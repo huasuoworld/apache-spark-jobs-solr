@@ -2,7 +2,6 @@ package org.huasuoworld.app;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 
@@ -10,12 +9,9 @@ import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.common.SolrInputDocument;
-import org.apache.spark.Partition;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.Function;
-import org.apache.spark.api.java.function.Function2;
 import org.apache.spark.api.java.function.MapFunction;
-import org.apache.spark.rdd.RDD;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
@@ -55,7 +51,7 @@ public class HdfsToSolr implements java.io.Serializable {
 			JavaRDD<String> zhazhahuiRDD = spark.sparkContext().textFile(logFile, 1)
 					.toJavaRDD();
 			// The schema is encoded in a string
-			String schemaString = "name,value,row_number";
+			String schemaString = "name,value";
 
 			// Generate the schema based on the string of schema
 			List<StructField> fields = new ArrayList<StructField>();
@@ -68,12 +64,10 @@ public class HdfsToSolr implements java.io.Serializable {
 			// Convert records of the RDD (people) to Rows
 			JavaRDD<Row> rowRDD = zhazhahuiRDD.map(new Function<String, Row>() {
 				private static final long serialVersionUID = 1L;
-				int i = 0;
 				public Row call(String record) throws Exception {
 					System.out.println("record>>" + record);
 					String[] attributes = record.split(",");
-					Row row = RowFactory.create(attributes[0], attributes[1], i);
-					i++;
+					Row row = RowFactory.create(attributes[0], attributes[1]);
 					return row;
 				}
 			}
@@ -113,45 +107,49 @@ public class HdfsToSolr implements java.io.Serializable {
 			);
 			logData.show();
 			int batchSize = 500;
-			Object numBs = logData.take(batchSize);
+//			Object numBs = logData.take(batchSize);
 			
-			scala.collection.Iterator<Tuple2<String, String>> logDataIt = logData.rdd().toLocalIterator();
+			scala.collection.Iterator<Tuple2<String, String>> logDataIt = logData.rdd().cache().toLocalIterator();
 			Collection<SolrInputDocument> docs = new ArrayList<SolrInputDocument>();
 			try {
-				while(numBs != null) {
-					System.out.println(numBs.getClass().getSimpleName());
-					if(numBs != null && numBs instanceof Tuple2[]) {
-						
-						Tuple2<String, String>[] tuple2List = (Tuple2<String, String>[]) numBs;
-						for(Tuple2<String, String> tuple2: tuple2List) {
-							
-							SolrInputDocument doc = new SolrInputDocument();
-							String id = UUID.randomUUID().toString().replaceAll("-", "");
-							doc.addField("id", id);
-							doc.addField("Name", tuple2._1);
-							doc.addField("value", tuple2._2);
-							doc.addField("description", "新增文档" + id);
-							docs.add(doc);
-							System.out.println(id + ">>" + tuple2._1+">>" + tuple2._2);
-						}
+				int i = 0;
+				while(logDataIt.hasNext()) {
+					Tuple2<String, String> tuple2 = logDataIt.next();
+					SolrInputDocument doc = new SolrInputDocument();
+					String id = UUID.randomUUID().toString().replaceAll("-", "");
+					doc.addField("id", id);
+					doc.addField("Name", tuple2._1);
+					doc.addField("value", tuple2._2);
+					doc.addField("description", "新增文档" + id);
+					docs.add(doc);
+					System.out.println(id + ">>" + tuple2._1+">>" + tuple2._2);
+
+					if(i != 0 && i % batchSize == 0) {
+						System.out.println("Add doc size" + docs.size());
+		            	UpdateResponse rsp = solrclient.add(docs);
+		            	System.out.println("commit doc to index" + " result:" + rsp.getStatus() + " Qtime:" + rsp.getQTime());
+		            	solrclient.commit();
+		            	docs.clear();
 					}
 					
-					System.out.println("Add doc size" + docs.size());
-	            	UpdateResponse rsp = solrclient.add(docs);
-	            	System.out.println("commit doc to index" + " result:" + rsp.getStatus() + " Qtime:" + rsp.getQTime());
-	            	solrclient.commit();
-	            	docs.clear();
-					
-					numBs = logData.take(batchSize);
-					System.out.println("while>>" + numBs);
-					break;
+	            	i++;
 				}
 			} catch (Exception e) {
 				e.printStackTrace();
 			} finally {
 				System.out.println("finally>>");
-				if(solrclient != null) {
-					solrclient.close();
+				try {
+					System.out.println("Add doc size" + docs.size());
+	            	UpdateResponse rsp = solrclient.add(docs);
+	            	System.out.println("commit doc to index" + " result:" + rsp.getStatus() + " Qtime:" + rsp.getQTime());
+	            	solrclient.commit();
+	            	docs.clear();
+				} catch (Exception e2) {
+					e2.printStackTrace();
+				} finally {
+					if(solrclient != null) {
+						solrclient.close();
+					}
 				}
 			}
 		} catch (Exception e) {
